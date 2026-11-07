@@ -1,14 +1,21 @@
 name: Release
 
+# pull_request_target runs in the context of main, so a merged pull request
+# from a fork still gets the deploy key and packages: write. It is safe here
+# because no job ever checks out the pull request code: the release job checks
+# out main and the later jobs check out the new tag.
 on:
-  pull_request:
+  pull_request_target:
     types: [closed]
     branches: [main]
 
-permissions:
-  contents: write
-  packages: write
-  pull-requests: read
+# Two quick merges queue instead of racing on the version bump.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+# Each job asks only for the permissions it needs.
+permissions: {}
 
 env:
   REGISTRY: ghcr.io
@@ -46,6 +53,12 @@ jobs:
     needs: check-release
     if: needs.check-release.outputs.should_release == 'true'
     runs-on: ubuntu-26.04
+    # The release environment holds RELEASE_DEPLOY_KEY and only main can use it.
+    environment: release
+    # The bump commit and the tag are pushed over SSH with the deploy key, not
+    # with GITHUB_TOKEN, so the token only needs to read.
+    permissions:
+      contents: read
     outputs:
       new_version: ${{ steps.bump-version.outputs.new_version }}
     steps:
@@ -69,6 +82,7 @@ jobs:
         run: |
           CURRENT=$(grep -oP '__version__ = "\K[^"]+' "$VERSION_FILE")
           echo "Current version: $CURRENT"
+          [[ $CURRENT =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::invalid version"; exit 1; }
 
           IFS='.' read -ra PARTS <<< "$CURRENT"
           MAJOR=${PARTS[0]}; MINOR=${PARTS[1]}; PATCH=${PARTS[2]}
