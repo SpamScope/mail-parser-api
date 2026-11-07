@@ -1,0 +1,19 @@
+version: 2
+updates:
+  # Production dependencies only: a new mail-parser on PyPI becomes a PR,
+  # then a release and a new image.
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    allow:
+      - dependency-type: production
+    labels:
+      - patch_release
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    labels:
+      - patch_release

@@ -1,0 +1,56 @@
+exclude: '^\.github/'
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.17.4
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      # Sample emails are test data and must stay byte-for-byte as received.
+      - id: trailing-whitespace
+        exclude: ^tests/unittests/files/
+      - id: end-of-file-fixer
+        exclude: ^tests/unittests/files/
+      - id: check-yaml
+      - id: check-added-large-files
+        args: ['--maxkb=5000']
+      - id: check-case-conflict
+      - id: check-json
+      - id: check-merge-conflict
+      - id: detect-aws-credentials
+        args: ["--allow-missing-credentials"]
+      - id: detect-private-key
+      - id: mixed-line-ending
+        exclude: ^tests/unittests/files/
+      - id: check-ast
+
+  - repo: https://github.com/executablebooks/mdformat
+    rev: 0.7.22
+    hooks:
+      - id: mdformat
+        additional_dependencies:
+          - mdformat-frontmatter
+          - mdformat-gfm
+          - mdformat-tables
+
+  - repo: https://github.com/DavidAnson/markdownlint-cli2
+    rev: v0.24.0
+    hooks:
+      - id: markdownlint-cli2
+        language_version: 22.17.1
+        args: ['--config', '.markdownlint.json']
+
+  - repo: local
+    hooks:
+      - id: pyright
+        name: pyright
+        entry: uv run pyright
+        args: [src/, tests/]
+        language: system
+        pass_filenames: false
+        types: [python]

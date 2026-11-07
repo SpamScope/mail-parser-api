@@ -1,0 +1,97 @@
+name: CI - Build and Test
+
+on:
+  pull_request:
+    branches: [main]
+    # labeled/unlabeled re-run the label check when release labels change.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+# Cancel in-progress runs for the same branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  # Validate PR has exactly one release label
+  validate-labels:
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Check release labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Fetch labels from GitHub API to ensure we get the latest
+          PR_LABELS=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.labels[].name' | tr '\n' ' ')
+          echo "PR Labels: $PR_LABELS"
+
+          # Count release labels
+          MAJOR_COUNT=$(echo "$PR_LABELS" | grep -c "major_release" || true)
+          MINOR_COUNT=$(echo "$PR_LABELS" | grep -c "minor_release" || true)
+          PATCH_COUNT=$(echo "$PR_LABELS" | grep -c "patch_release" || true)
+
+          TOTAL_RELEASE_LABELS=$((MAJOR_COUNT + MINOR_COUNT + PATCH_COUNT))
+
+          echo "Found $TOTAL_RELEASE_LABELS release label(s)"
+
+          if [ "$TOTAL_RELEASE_LABELS" -eq 0 ]; then
+            echo "::error::No release label found. Please add exactly one of: major_release, minor_release, or patch_release"
+            exit 1
+          elif [ "$TOTAL_RELEASE_LABELS" -gt 1 ]; then
+            echo "::error::Multiple release labels found. Please use exactly one of: major_release, minor_release, or patch_release"
+            exit 1
+          fi
+
+          echo "Valid release label found"
+
+  # Lint, test, and build in a single runner — avoids 2x checkout + uv-sync overhead
+  lint-test-build:
+    runs-on: ubuntu-26.04
+    needs: validate-labels
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.3
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: |
+          uv sync --all-extras
+          echo "VIRTUAL_ENV=.venv" >> $GITHUB_ENV
+          echo "PATH=${{ github.workspace }}/.venv/bin:${PATH}" >> $GITHUB_ENV
+
+      - name: Lint
+        run: make pre-commit
+
+      - name: Test
+        run: make test-cov
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-report
+          path: htmlcov/
+          retention-days: 7
+
+      - name: Build package
+        run: uv build
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: python-package
+          path: dist/
+          retention-days: 7
