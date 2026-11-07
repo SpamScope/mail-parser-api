@@ -27,7 +27,10 @@ USER app
 EXPOSE 8000
 
 # One worker keeps the in-memory rate limiter consistent; uvicorn's access log
-# is replaced by the application's own, which omits client addresses.
+# is replaced by the application's own, which omits client addresses. The
+# concurrency limit is above the two parse slots so that health checks still
+# get through while parses wait for a slot.
 CMD ["uvicorn", "mail_parser_api.app:create_app", "--factory", \
      "--host", "0.0.0.0", "--port", "8000", \
-     "--workers", "1", "--limit-concurrency", "8", "--no-access-log"]
+     "--workers", "1", "--limit-concurrency", "12", \
+     "--no-access-log", "--no-server-header"]

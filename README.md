@@ -52,12 +52,19 @@ the reverse proxy does not expose it.
 - Each request runs the installed mail-parser CLI (`mail-parser --stdin --json`)
   in a subprocess. The email goes to its stdin, never through a shell; the
   subprocess is killed after 10 seconds.
+- The request body is limited to 5 MB.
+- At most 2 emails are parsed at once; further requests wait for a free slot.
+- In the container each parse is limited to 192 MiB of address space
+  (`prlimit`) and is the first process the kernel kills when memory runs out
+  (`choom`), so the server survives. Such an email gets `422` with
+  `email too complex to parse within the service limits`.
 - Rate limit: 10 requests per 60-second sliding window per client key, in
   memory, for at most 10 000 keys (least recently used evicted first). The
   client key is the first `X-Forwarded-For` value, or the peer address without
   it: an IPv4 address whole, an IPv6 address collapsed to its `/64`. The header
   is trusted because the service runs only behind a reverse proxy that sets it.
-- uvicorn runs one worker with `--limit-concurrency 8`.
+- uvicorn runs one worker with `--limit-concurrency 12`, above the parse
+  slots so that health checks still get through.
 - The access log has only method, path, status and response size. Request
   bodies and email headers are never logged.
 - The container image runs as a non-root user and works with a read-only root

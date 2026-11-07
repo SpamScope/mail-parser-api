@@ -15,6 +15,10 @@ MAX_BODY_BYTES = 5 * 1024 * 1024
 RATE_LIMIT_REQUESTS = 10
 RATE_LIMIT_WINDOW_SECONDS = 60
 RATE_LIMIT_MAX_KEYS = 10_000
+# Parses running at once. It bounds total child memory (2 x 192 MiB, see
+# CHILD_ADDRESS_SPACE_BYTES in parser.py, plus the server) under the 512 MiB
+# container limit; further requests wait for a free slot.
+PARSE_CONCURRENCY = 2
 
 RFC822_CONTENT_TYPE = "message/rfc822"
 OUTLOOK_CONTENT_TYPE = "application/vnd.ms-outlook"
@@ -58,6 +62,7 @@ def create_app() -> FastAPI:
         window=RATE_LIMIT_WINDOW_SECONDS,
         max_keys=RATE_LIMIT_MAX_KEYS,
     )
+    parse_slots = asyncio.Semaphore(PARSE_CONCURRENCY)
 
     @app.middleware("http")
     async def log_access(
@@ -89,7 +94,8 @@ def create_app() -> FastAPI:
         raw_email = await _read_body(request)
 
         try:
-            message = await asyncio.to_thread(parse_email, raw_email)
+            async with parse_slots:
+                message = await asyncio.to_thread(parse_email, raw_email)
         except ParseTimeoutError as error:
             raise HTTPException(status_code=504, detail="Parsing timed out") from error
         except ParseError as error:

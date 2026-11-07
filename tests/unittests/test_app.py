@@ -6,6 +6,7 @@ import pytest
 
 from mail_parser_api import app as app_module
 from mail_parser_api.app import MAX_BODY_BYTES, RATE_LIMIT_REQUESTS
+from mail_parser_api.parser import TOO_COMPLEX_ERROR
 
 RFC822 = {"Content-Type": "message/rfc822"}
 
@@ -111,6 +112,17 @@ def test_parser_failure_returns_422(client, monkeypatch):
 
     assert response.status_code == 422
     assert response.json() == {"detail": "boom"}
+
+
+def test_killed_parser_returns_422_too_complex(client, monkeypatch):
+    def killed(*_args, **_kwargs):
+        return subprocess.CompletedProcess(args=[], returncode=-9, stdout=b"")
+
+    monkeypatch.setattr(subprocess, "run", killed)
+    response = client.post("/api/parse", content=b"Subject: x\n\nx", headers=RFC822)
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": TOO_COMPLEX_ERROR}
 
 
 def test_parser_timeout_returns_504(client, monkeypatch):
