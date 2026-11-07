@@ -16,10 +16,13 @@ permissions:
   pull-requests: read
 
 jobs:
-  # Validate PR has exactly one release label
-  validate-labels:
+  # Lint, test, and build in a single runner — avoids 2x checkout + uv-sync overhead
+  lint-test-build:
     runs-on: ubuntu-26.04
     steps:
+      # The release label check runs here, in the required job, and not in a
+      # separate job this one needs: a job skipped because a needed job failed
+      # satisfies the required check, so an unlabeled PR would be mergeable.
       - name: Check release labels
         env:
           GH_TOKEN: ${{ github.token }}
@@ -27,15 +30,12 @@ jobs:
           REPO: ${{ github.repository }}
         run: |
           # Fetch labels from GitHub API to ensure we get the latest
-          PR_LABELS=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.labels[].name' | tr '\n' ' ')
-          echo "PR Labels: $PR_LABELS"
+          PR_LABELS=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.labels[].name')
+          echo "PR Labels: $(echo "$PR_LABELS" | tr '\n' ' ')"
 
-          # Count release labels
-          MAJOR_COUNT=$(echo "$PR_LABELS" | grep -c "major_release" || true)
-          MINOR_COUNT=$(echo "$PR_LABELS" | grep -c "minor_release" || true)
-          PATCH_COUNT=$(echo "$PR_LABELS" | grep -c "patch_release" || true)
-
-          TOTAL_RELEASE_LABELS=$((MAJOR_COUNT + MINOR_COUNT + PATCH_COUNT))
+          # Count release labels: one label per line, whole-line matches only,
+          # so a label such as not_patch_release does not count.
+          TOTAL_RELEASE_LABELS=$(echo "$PR_LABELS" | grep -cxE "major_release|minor_release|patch_release" || true)
 
           echo "Found $TOTAL_RELEASE_LABELS release label(s)"
 
@@ -49,11 +49,6 @@ jobs:
 
           echo "Valid release label found"
 
-  # Lint, test, and build in a single runner — avoids 2x checkout + uv-sync overhead
-  lint-test-build:
-    runs-on: ubuntu-26.04
-    needs: validate-labels
-    steps:
       - name: Checkout code
         uses: actions/checkout@v7
 
