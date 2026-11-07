@@ -81,12 +81,15 @@ jobs:
           path: htmlcov/
           retention-days: 7
 
-      - name: Build package
-        run: uv build
+      # Building the image installs the package from uv.lock, so a broken
+      # lockfile or Dockerfile fails here, before a release tag exists.
+      - uses: docker/setup-buildx-action@v4
 
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v7
+      - name: Build image
+        uses: docker/build-push-action@v7
         with:
-          name: python-package
-          path: dist/
-          retention-days: 7
+          context: .
+          push: false
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
