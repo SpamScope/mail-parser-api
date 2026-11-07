@@ -99,16 +99,24 @@ See [CLAUDE.md](CLAUDE.md) for the coding rules.
 
 Every pull request to `main` needs exactly one release label: `major_release`,
 `minor_release` or `patch_release`. CI checks the label, then runs lint, tests
-and the package build (`lint-test-build`, required by the `main` ruleset).
+and a `linux/amd64` image build without pushing (`lint-test-build`, required
+before merge), so a broken lockfile or Dockerfile fails before a tag exists.
 
-When the pull request is squash-merged, the release workflow:
+When the pull request is squash-merged, the release workflow
+(`pull_request_target`, so merged fork pull requests release too; it never
+checks out pull request code) runs one release at a time and:
 
 1. bumps `__version__` in `src/mail_parser_api/__init__.py` according to the
-   label and tags `vX.Y.Z` (pushed with the `RELEASE_DEPLOY_KEY` deploy key,
-   the only bypass actor of the ruleset);
+   label and tags `vX.Y.Z`, pushed with the `RELEASE_DEPLOY_KEY` deploy key,
+   a secret of the `release` environment that only `main` can use;
 1. publishes `ghcr.io/spamscope/mail-parser-api:X.Y.Z` and `:latest` for
    `linux/amd64` and `linux/arm64`;
 1. creates the GitHub release with generated notes.
+
+Two rulesets protect `main`. `main` requires a pull request and the
+`lint-test-build` check; the deploy key is its only bypass actor, so the bump
+commit can land without a pull request. `main-protect` blocks deletion and
+force pushes with no bypass, not even for the deploy key.
 
 Dependabot opens weekly pull requests, labelled `patch_release`, for production
 dependencies and GitHub Actions, so a new mail-parser on PyPI becomes a new
