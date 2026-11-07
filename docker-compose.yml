@@ -1,0 +1,10 @@
+# Local run with the same hardening used in production.
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp]

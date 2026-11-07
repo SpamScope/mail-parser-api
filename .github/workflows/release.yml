@@ -1,0 +1,175 @@
+name: Release
+
+# pull_request_target runs in the context of main, so a merged pull request
+# from a fork still gets the deploy key and packages: write. It is safe here
+# because no job ever checks out the pull request code: the release job checks
+# out main and the later jobs check out the new tag.
+on:
+  pull_request_target:
+    types: [closed]
+    branches: [main]
+
+# Two quick merges queue instead of racing on the version bump.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+# Each job asks only for the permissions it needs.
+permissions: {}
+
+env:
+  REGISTRY: ghcr.io
+  VERSION_FILE: src/mail_parser_api/__init__.py
+
+jobs:
+  check-release:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-26.04
+    outputs:
+      release_type: ${{ steps.check-labels.outputs.release_type }}
+      should_release: ${{ steps.check-labels.outputs.should_release }}
+    steps:
+      - name: Check PR labels for release type
+        id: check-labels
+        env:
+          PR_LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+        run: |
+          if echo "$PR_LABELS" | grep -q "major_release"; then
+            echo "release_type=major" >> $GITHUB_OUTPUT
+            echo "should_release=true" >> $GITHUB_OUTPUT
+          elif echo "$PR_LABELS" | grep -q "minor_release"; then
+            echo "release_type=minor" >> $GITHUB_OUTPUT
+            echo "should_release=true" >> $GITHUB_OUTPUT
+          elif echo "$PR_LABELS" | grep -q "patch_release"; then
+            echo "release_type=patch" >> $GITHUB_OUTPUT
+            echo "should_release=true" >> $GITHUB_OUTPUT
+          else
+            echo "release_type=none" >> $GITHUB_OUTPUT
+            echo "should_release=false" >> $GITHUB_OUTPUT
+            echo "No release label found — skipping release."
+          fi
+
+  release:
+    needs: check-release
+    if: needs.check-release.outputs.should_release == 'true'
+    runs-on: ubuntu-26.04
+    # The release environment holds RELEASE_DEPLOY_KEY and only main can use it.
+    environment: release
+    # The bump commit and the tag are pushed over SSH with the deploy key, not
+    # with GITHUB_TOKEN, so the token only needs to read.
+    permissions:
+      contents: read
+    outputs:
+      new_version: ${{ steps.bump-version.outputs.new_version }}
+    steps:
+      # The deploy key is the ruleset bypass actor: it lets the bump commit
+      # and the tag reach main without a pull request.
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+          ssh-key: ${{ secrets.RELEASE_DEPLOY_KEY }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Bump version
+        id: bump-version
+        env:
+          RELEASE_TYPE: ${{ needs.check-release.outputs.release_type }}
+        run: |
+          CURRENT=$(grep -oP '__version__ = "\K[^"]+' "$VERSION_FILE")
+          echo "Current version: $CURRENT"
+          [[ $CURRENT =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::invalid version"; exit 1; }
+
+          IFS='.' read -ra PARTS <<< "$CURRENT"
+          MAJOR=${PARTS[0]}; MINOR=${PARTS[1]}; PATCH=${PARTS[2]}
+
+          case $RELEASE_TYPE in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+          esac
+
+          NEW="${MAJOR}.${MINOR}.${PATCH}"
+          echo "New version: $NEW"
+          echo "new_version=$NEW" >> $GITHUB_OUTPUT
+
+          sed -i "s/__version__ = \"$CURRENT\"/__version__ = \"$NEW\"/" "$VERSION_FILE"
+
+          git add "$VERSION_FILE"
+          git commit -m "chore: bump version to $NEW [skip ci]"
+          git tag -a "v$NEW" -m "Release v$NEW"
+          git push origin main --tags
+
+  publish-docker:
+    needs: release
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: v${{ needs.release.outputs.new_version }}
+
+      - name: Set lowercase image name
+        id: image
+        run: echo "name=${GITHUB_REPOSITORY,,}" >> $GITHUB_OUTPUT
+
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}:${{ needs.release.outputs.new_version }}
+            ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}:latest
+          labels: |
+            org.opencontainers.image.title=mail-parser-api
+            org.opencontainers.image.description=Stateless HTTP API that parses raw emails with mail-parser
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ needs.release.outputs.new_version }}
+            org.opencontainers.image.licenses=Apache-2.0
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ steps.image.outputs.name }}:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ steps.image.outputs.name }}:buildcache,mode=max
+          platforms: linux/amd64,linux/arm64
+
+  create-github-release:
+    needs: [release, publish-docker]
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: write
+    steps:
+      - name: Set lowercase image name
+        id: image
+        run: echo "name=${GITHUB_REPOSITORY,,}" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: v${{ needs.release.outputs.new_version }}
+          name: Release v${{ needs.release.outputs.new_version }}
+          generate_release_notes: true
+          body: |
+            ## Docker Image
+
+            ```bash
+            docker pull ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}:${{ needs.release.outputs.new_version }}
+            ```
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

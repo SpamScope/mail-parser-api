@@ -1,0 +1,95 @@
+name: CI - Build and Test
+
+on:
+  pull_request:
+    branches: [main]
+    # labeled/unlabeled re-run the label check when release labels change.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+# Cancel in-progress runs for the same branch
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  # Lint, test, and build in a single runner — avoids 2x checkout + uv-sync overhead
+  lint-test-build:
+    runs-on: ubuntu-26.04
+    steps:
+      # The release label check runs here, in the required job, and not in a
+      # separate job this one needs: a job skipped because a needed job failed
+      # satisfies the required check, so an unlabeled PR would be mergeable.
+      - name: Check release labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Fetch labels from GitHub API to ensure we get the latest
+          PR_LABELS=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.labels[].name')
+          echo "PR Labels: $(echo "$PR_LABELS" | tr '\n' ' ')"
+
+          # Count release labels: one label per line, whole-line matches only,
+          # so a label such as not_patch_release does not count.
+          TOTAL_RELEASE_LABELS=$(echo "$PR_LABELS" | grep -cxE "major_release|minor_release|patch_release" || true)
+
+          echo "Found $TOTAL_RELEASE_LABELS release label(s)"
+
+          if [ "$TOTAL_RELEASE_LABELS" -eq 0 ]; then
+            echo "::error::No release label found. Please add exactly one of: major_release, minor_release, or patch_release"
+            exit 1
+          elif [ "$TOTAL_RELEASE_LABELS" -gt 1 ]; then
+            echo "::error::Multiple release labels found. Please use exactly one of: major_release, minor_release, or patch_release"
+            exit 1
+          fi
+
+          echo "Valid release label found"
+
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.3.3
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: |
+          uv sync --all-extras
+          echo "VIRTUAL_ENV=.venv" >> $GITHUB_ENV
+          echo "PATH=${{ github.workspace }}/.venv/bin:${PATH}" >> $GITHUB_ENV
+
+      - name: Lint
+        run: make pre-commit
+
+      - name: Test
+        run: make test-cov
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-report
+          path: htmlcov/
+          retention-days: 7
+
+      # Building the image installs the package from uv.lock, so a broken
+      # lockfile or Dockerfile fails here, before a release tag exists.
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: false
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
