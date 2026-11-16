@@ -15,7 +15,7 @@ requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.30.0",
-    "mail-parser[outlook]>=4.10.0",
+    "mail-parser[outlook]>=4.11.0",
 ]
 
 [project.urls]
