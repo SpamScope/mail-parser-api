@@ -26,3 +26,18 @@ The identity the rate limiter counts requests against: the first
 `X-Forwarded-For` value or the peer address, an IPv4 address whole or an IPv6
 address collapsed to its `/64` network.
 _Avoid_: Client IP, user, session
+
+**MIME tree**:
+The flat list of the MIME parts of one raw email, returned under `mime_tree`
+beside the parsed message; every part names the part that encloses it.
+_Avoid_: Structure, MIME structure, part tree
+
+**Part left out**:
+A MIME part of the raw email that is not in the returned MIME tree because a
+response bound was reached; it is counted, never dropped silently.
+_Avoid_: Dropped part, truncated part
+
+**Cut value**:
+A text value of a MIME tree entry shortened to the bound, with the name of its
+key recorded in that entry's `cut`.
+_Avoid_: Truncated value, trimmed value
