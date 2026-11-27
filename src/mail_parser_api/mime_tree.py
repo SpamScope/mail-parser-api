@@ -25,18 +25,22 @@ The first entry that would exceed it and every entry after it are left out:
 million characters, and a control character takes six bytes in JSON.
 """
 
-_NOT_WHITESPACE = re.compile(r"[^ \t\n\r]")
+# The CLI prints the tree with ``indent=2``: an entry of the array opens and
+# closes at column 2, its nested ``embedded_headers`` closes at column 4, and
+# no JSON string holds a raw line break. So this marks the end of an entry.
+_ENTRY_CLOSE = b"\n  }"
+_NOT_WHITESPACE = re.compile(rb"[^ \t\n\r]")
 
 
-def read_mime_tree(text: str, start: int) -> tuple[list[dict[str, Any]], int]:
-    """Decode the JSON array of the MIME tree and keep its bounded prefix.
+def read_mime_tree(output: bytes, start: int) -> tuple[list[dict[str, Any]], int]:
+    """Decode the MIME tree the CLI printed and keep its bounded prefix.
 
-    Entries are decoded one at a time: those past the bounds are counted and
-    dropped as soon as they are decoded, so the memory held does not grow
-    with the number of parts the sender chose.
+    The output is never decoded as a whole: one non-BMP character would make
+    Python store all of it at four bytes per character. Only the kept entries
+    are decoded, one at a time; the others are found and counted.
 
     Args:
-        text: The CLI output.
+        output: The CLI stdout.
         start: Where the array may start, after optional whitespace.
 
     Returns:
@@ -44,15 +48,16 @@ def read_mime_tree(text: str, start: int) -> tuple[list[dict[str, Any]], int]:
         with ``cut``, and the number of entries not kept.
 
     Raises:
-        ValueError: The text at ``start`` is not a JSON array of objects.
+        ValueError: The bytes at ``start`` are not the indented JSON array of
+            objects the CLI prints.
 
     """
     kept: list[dict[str, Any]] = []
     left_out = 0
     characters = 0
-    for entry in _entries(text, start):
+    for begin, end in _entry_spans(output, start):
         if not left_out and len(kept) < MAX_MIME_TREE_PARTS:
-            part = _bounded_part(entry)
+            part = _bounded_part(_decode_entry(output[begin:end]))
             characters += _text_length(part)
             if characters <= MAX_MIME_TREE_TEXT:
                 kept.append(part)
@@ -61,40 +66,50 @@ def read_mime_tree(text: str, start: int) -> tuple[list[dict[str, Any]], int]:
     return kept, left_out
 
 
-def _entries(text: str, start: int) -> Iterator[dict[str, Any]]:
-    """Yield the objects of the JSON array at ``start``, one at a time.
+def _entry_spans(output: bytes, start: int) -> Iterator[tuple[int, int]]:
+    """Yield where each entry of the indented array at ``start`` begins and ends.
 
     Raises:
-        ValueError: The text is not a closed JSON array of objects.
+        ValueError: The bytes are not a closed, indented JSON array of objects.
 
     """
-    decoder = json.JSONDecoder()
-    position = _skip_whitespace(text, start)
-    if not text.startswith("[", position):
+    position = _skip_whitespace(output, start)
+    if not output.startswith(b"[", position):
         message = "the MIME tree is not a JSON array"
         raise ValueError(message)
-    position = _skip_whitespace(text, position + 1)
-    if text.startswith("]", position):
+    position = _skip_whitespace(output, position + 1)
+    if output.startswith(b"]", position):
         return
     while True:
-        entry, position = decoder.raw_decode(text, position)
-        if not isinstance(entry, dict):
-            message = "a MIME tree entry is not a JSON object"
-            raise ValueError(message)  # noqa: TRY004 - malformed output, not a type
-        yield entry
-        position = _skip_whitespace(text, position)
-        if text.startswith("]", position):
+        close = output.find(_ENTRY_CLOSE, position)
+        if not output.startswith(b"{", position) or close < 0:
+            message = "a MIME tree entry is not an indented JSON object"
+            raise ValueError(message)
+        end = close + len(_ENTRY_CLOSE)
+        yield position, end
+        position = _skip_whitespace(output, end)
+        if output.startswith(b"]", position):
             return
-        if not text.startswith(",", position):
+        if not output.startswith(b",", position):
             message = "the MIME tree array is not closed"
             raise ValueError(message)
-        position = _skip_whitespace(text, position + 1)
+        position = _skip_whitespace(output, position + 1)
 
 
-def _skip_whitespace(text: str, position: int) -> int:
-    """Return the position of the next non-whitespace character, or the end."""
-    match = _NOT_WHITESPACE.search(text, position)
-    return match.start() if match else len(text)
+def _skip_whitespace(output: bytes, position: int) -> int:
+    """Return the position of the next non-whitespace byte, or the end."""
+    match = _NOT_WHITESPACE.search(output, position)
+    return match.start() if match else len(output)
+
+
+def _decode_entry(entry: bytes) -> dict[str, Any]:
+    """Decode one entry, whose bytes start with ``{``.
+
+    Raises:
+        ValueError: The bytes are not one complete JSON object.
+
+    """
+    return json.loads(entry.decode("utf-8", errors="replace"))
 
 
 def _bounded_part(entry: dict[str, Any]) -> dict[str, Any]:

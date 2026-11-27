@@ -109,10 +109,9 @@ def parse_email(raw_email: bytes) -> ParsedEmail:
     if completed.returncode != 0:
         raise ParseError(_error_message(completed.stderr))
 
-    stdout = completed.stdout.decode("utf-8", errors="replace")
     try:
-        message, end = _decode_message(stdout)
-        mime_tree, parts_left_out = read_mime_tree(stdout, end)
+        message, end = _decode_message(completed.stdout)
+        mime_tree, parts_left_out = read_mime_tree(completed.stdout, end)
     except ValueError as error:
         raise ParseError(GENERIC_ERROR) from error
     for attachment in message.get("attachments", []):
@@ -127,20 +126,28 @@ def _command() -> tuple[str, ...]:
     return MAIL_PARSER_COMMAND
 
 
-def _decode_message(stdout: str) -> tuple[dict[str, Any], int]:
+# The CLI prints the mail with ``indent=2`` and a line break: its closing brace
+# is the only one at column 0, and no JSON string holds a raw line break.
+MESSAGE_END = b"\n}\n"
+
+
+def _decode_message(stdout: bytes) -> tuple[dict[str, Any], int]:
     """Return the mail JSON object that starts stdout and where it ends.
 
-    It is decoded in place, without copying the output, to keep the memory of
-    large results low.
+    Only the mail is decoded to text. The MIME tree after it can be tens of
+    megabytes, and decoding all of stdout at once would hold it at up to four
+    bytes per character in the server.
 
     Raises:
-        ValueError: stdout does not start with a JSON object.
+        ValueError: stdout does not start with the indented mail object.
 
     """
-    if not stdout.startswith("{"):
-        message = "the output does not start with a JSON object"
+    line_break = stdout.find(MESSAGE_END)
+    if not stdout.startswith(b"{") or line_break < 0:
+        message = "the output does not start with the mail JSON object"
         raise ValueError(message)
-    return json.JSONDecoder().raw_decode(stdout)
+    end = line_break + len(b"\n}")
+    return json.loads(stdout[:end].decode("utf-8", errors="replace")), end
 
 
 def _error_message(stderr: bytes) -> str:

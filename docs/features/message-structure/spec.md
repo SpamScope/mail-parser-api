@@ -141,10 +141,17 @@ parts, by counting them first. This service cannot: the CLI builds the whole
 tree in the child before anything is printed. The child's limits stay the
 guard here, and such a message fails as too complex.
 
-The service decodes the entries of the array one at a time and keeps only
-those inside the bounds; the others are counted and dropped as soon as they
-are decoded. Decoding the whole array first would hold up to 55 MiB of
-objects per parse in uvicorn (PID 1), with two parses at once.
+stdout is never decoded to text as a whole. The service decodes the mail,
+then each kept entry of the tree, from its own slice of the bytes; past the
+bounds it only finds where entries end and counts them. The slices are found
+in the layout the CLI prints (`indent=2`: the mail closes with the only `}`
+at column 0, an entry with the only `}` at column 2, and no JSON string
+holds a raw line break); any other layout is unparsable output. Security
+review, 2026-11-27: decoding all of stdout made one character outside the
+BMP (`Subject: 😀`) store the whole str at four bytes per character, about
+six times stdout in uvicorn (PID 1), and two concurrent 85,000-part emails
+got the container OOM-killed. With the slices the same sequence keeps PID 1
+alive; under that load the kernel kills children, which answer `422`.
 
 ## Measurements (2026-11-27)
 
@@ -168,8 +175,10 @@ service runs it: `choom -n 1000 -- prlimit --as=201326592 --`,
 - Without `--mime-tree` the same cap passes about 250,000 empty parts: the
   tree lowers the limit to about 90,000.
 - The largest tree that passes is 29 to 37 MB of JSON, about 420 bytes per
-  entry. Holding and decoding it in the parent peaks at 125 MiB; two such
-  parses at once peaked at 411 MiB in the container, without uvicorn.
+  entry. Holding it and decoding all of it at once, ASCII only, peaked at
+  125 MiB in the parent; two such parses at once peaked at 411 MiB in the
+  container, without uvicorn. The service no longer decodes it at once (see
+  above).
 - Nesting fails with `MailParserRecursionError` with or without
   `--mime-tree`; it is a limit of the parse, not of the tree.
 - No lone surrogate reached stdout: the CLI writes UTF-8 with

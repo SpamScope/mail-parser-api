@@ -26,10 +26,17 @@ def entry(index: int, **values):
     }
 
 
-def read(entries, indent=2):
-    # The CLI prints the tree after the mail; ``start`` is where the mail ends.
-    text = '{"subject": "x"}\n' + json.dumps(entries, indent=indent) + "\n"
-    return read_mime_tree(text, text.index("\n"))
+def printed(entries, indent=2) -> bytes:
+    # As the CLI prints it: the mail, then the tree, both indented.
+    mail = json.dumps({"subject": "x"}, indent=2)
+    tree = json.dumps(entries, ensure_ascii=False, indent=indent)
+    return f"{mail}\n{tree}\n".encode()
+
+
+def read(entries):
+    output = printed(entries)
+    # ``start`` is where the mail ends, after its closing brace.
+    return read_mime_tree(output, output.index(b"\n}\n") + 2)
 
 
 def test_whole_tree_is_kept_with_an_empty_cut():
@@ -41,12 +48,26 @@ def test_whole_tree_is_kept_with_an_empty_cut():
     assert left_out == 0
 
 
-@pytest.mark.parametrize("indent", [None, 0, 2])
-def test_any_json_layout_is_read(indent):
-    kept, left_out = read([entry(0), entry(1)], indent=indent)
+@pytest.mark.parametrize("indent", [None, 0, 4])
+def test_tree_not_indented_as_the_cli_prints_it_raises(indent):
+    output = printed([entry(0), entry(1)], indent=indent)
 
-    assert [part["index"] for part in kept] == [0, 1]
-    assert left_out == 0
+    with pytest.raises(ValueError):  # noqa: PT011 - every other layout
+        read_mime_tree(output, output.index(b"\n}\n") + 2)
+
+
+def test_non_ascii_values_are_decoded():
+    kept, _ = read([entry(0, filename="fattura-\U0001f600-è.pdf")])
+
+    assert kept[0]["filename"] == "fattura-\U0001f600-è.pdf"
+
+
+def test_invalid_utf8_is_replaced():
+    output = printed([entry(0, filename="NAME")]).replace(b"NAME", b"a\xffb")
+
+    kept, _ = read_mime_tree(output, output.index(b"\n}\n") + 2)
+
+    assert kept[0]["filename"] == "a\ufffdb"
 
 
 def test_empty_array_is_an_empty_tree():
@@ -112,12 +133,16 @@ def test_text_bound_keeps_a_prefix_and_counts_the_rest():
     [
         pytest.param("", id="nothing"),
         pytest.param("{}", id="object"),
-        pytest.param("[1]", id="entry-not-an-object"),
-        pytest.param('[{"index": 0}', id="not-closed"),
-        pytest.param('[{"index": 0} {"index": 1}]', id="no-comma"),
-        pytest.param('[{"index": 0},]', id="trailing-comma"),
+        pytest.param("[\n  1\n]", id="entry-not-an-object"),
+        pytest.param('[\n  {\n    "index": 0', id="entry-not-closed"),
+        pytest.param('[\n  {\n    "index": 0\n  }', id="array-not-closed"),
+        pytest.param('[\n  {\n    "index": 0,\n  }\n]', id="invalid-entry"),
+        pytest.param(
+            '[\n  {\n    "index": 0\n  } {\n    "index": 1\n  }\n]', id="no-comma"
+        ),
+        pytest.param('[\n  {\n    "index": 0\n  },\n]', id="trailing-comma"),
     ],
 )
 def test_malformed_tree_raises(text):
     with pytest.raises(ValueError):  # noqa: PT011 - every malformed shape
-        read_mime_tree(text, 0)
+        read_mime_tree(text.encode(), 0)
