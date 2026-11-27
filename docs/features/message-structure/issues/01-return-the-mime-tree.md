@@ -33,9 +33,12 @@ brings the security fixes made since 4.11.0.
 - How a cut tree is reported (500 entries, 1024 characters per value,
   262,144 characters of text in all, `mime_tree_parts_left_out` and
   `cut`): see "How a cut tree is reported" in the spec.
-- Failing above about 70,000 parts is acceptable; the service counts no
+- The CLI may print at most 16 MiB, mail and tree together; above, `422`
+  with `TOO_COMPLEX_ERROR` (owner, 2026-11-27, after the security review):
+  see "Output cap" in the spec. `message` is whole or absent, never cut.
+- Failing above about 35,000 parts is acceptable; the service counts no
   parts of its own (owner, 2026-11-27). The measurements are under
-  "Measurements" in the spec: 68,000 tiny parts, 88,000 empty parts and
+  "Measurements" in the spec: 34,000 tiny parts, 40,000 empty parts and
   970 levels of nesting pass, a 5 MiB email of base64 attachments passes
   at the same peak as `--json` alone.
 
@@ -48,6 +51,7 @@ brings the security fixes made since 4.11.0.
   `mime_tree_parts_left_out == 100`; a file name of 5,000 characters
   returns 1024 of them and `cut == ["filename"]`; entries past 262,144
   characters of text are left out and counted.
+- [ ] Output that reaches 16 MiB returns `422` with `TOO_COMPLEX_ERROR`.
 - [ ] A failing CLI's `An error occurred:` line on stderr becomes the
   `422` detail.
 - [x] Measurements for the many-parts and the deeply-nested email recorded

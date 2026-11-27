@@ -6,6 +6,7 @@ from importlib.metadata import version
 import pytest
 
 from mail_parser_api import app as app_module
+from mail_parser_api import parser as parser_module
 from mail_parser_api.app import MAX_BODY_BYTES, RATE_LIMIT_REQUESTS
 from mail_parser_api.parser import (
     MAIL_PARSER_COMMAND,
@@ -91,6 +92,19 @@ def test_deeply_nested_email_keeps_a_bounded_tree(client):
     assert body["mime_tree_parts_left_out"] == levels + 2 - 500
 
 
+def test_output_over_the_cap_returns_422_too_complex(client, read_sample, monkeypatch):
+    # The real CLI: on macOS the cap is checked after the child exits, on
+    # Linux the kernel also stops the child at the original cap.
+    monkeypatch.setattr(parser_module, "CHILD_OUTPUT_BYTES", 1024)
+
+    response = client.post(
+        "/api/parse", content=read_sample("mail_test_10"), headers=RFC822
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": TOO_COMPLEX_ERROR}
+
+
 def test_parse_accepts_content_type_parameters(client, read_sample):
     response = client.post(
         "/api/parse",
@@ -157,41 +171,28 @@ def test_streamed_oversized_body_is_rejected(client):
     assert response.status_code == 413
 
 
-def test_parser_failure_returns_422(client, monkeypatch):
+def test_parser_failure_returns_422(client, fake_cli):
     stderr = (
         b"2026-01-01 00:00:00,000 | mailparser | __main__ | main | 235 | ERROR "
         b"| An error occurred: boom\nTraceback (most recent call last):\n"
     )
 
-    def fail(*_args, **_kwargs):
-        return subprocess.CompletedProcess(
-            args=[], returncode=1, stdout=b"", stderr=stderr
-        )
-
-    monkeypatch.setattr(subprocess, "run", fail)
+    fake_cli(1, stderr=stderr)
     response = client.post("/api/parse", content=b"Subject: x\n\nx", headers=RFC822)
 
     assert response.status_code == 422
     assert response.json() == {"detail": "boom"}
 
 
-def test_mail_without_tree_returns_422(client, monkeypatch):
-    def mail_only(*_args, **_kwargs):
-        return subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=b'{\n  "subject": "x"\n}\n', stderr=b""
-        )
-
-    monkeypatch.setattr(subprocess, "run", mail_only)
+def test_mail_without_tree_returns_422(client, fake_cli):
+    fake_cli(0, b'{\n  "subject": "x"\n}\n')
     response = client.post("/api/parse", content=b"Subject: x\n\nx", headers=RFC822)
 
     assert response.status_code == 422
 
 
-def test_killed_parser_returns_422_too_complex(client, monkeypatch):
-    def killed(*_args, **_kwargs):
-        return subprocess.CompletedProcess(args=[], returncode=-9, stdout=b"")
-
-    monkeypatch.setattr(subprocess, "run", killed)
+def test_killed_parser_returns_422_too_complex(client, fake_cli):
+    fake_cli(-9)
     response = client.post("/api/parse", content=b"Subject: x\n\nx", headers=RFC822)
 
     assert response.status_code == 422

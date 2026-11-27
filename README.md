@@ -75,7 +75,8 @@ The tree is bounded, and nothing is dropped silently:
   first entry that would exceed it and every entry after it are left out.
 
 `mime_tree_parts_left_out` is the number of entries left out, `0` when the
-tree is whole. `message` is never cut.
+tree is whole. `message` is never cut: it is whole or the request fails
+(see the output cap below).
 
 | Status | When                                                         | Body                                                |
 | ------ | ------------------------------------------------------------ | --------------------------------------------------- |
@@ -105,8 +106,14 @@ the reverse proxy does not expose it.
   (`prlimit`) and is the first process the kernel kills when memory runs out
   (`choom`), so the server survives. Such an email gets `422` with
   `email too complex to parse within the service limits`. Measured with
-  mail-parser 4.12.0, the limit falls between 68,000 and 90,000 MIME parts,
-  or past 970 levels of nesting; a 5 MB email of base64 attachments passes.
+  mail-parser 4.12.0, the limit falls past 970 levels of nesting; a 5 MB
+  email of base64 attachments passes.
+- The CLI may print at most 16 MiB, the mail and the MIME tree together:
+  its stdout goes to a temporary file in `/tmp`, which `prlimit --fsize`
+  caps in the container. An email that reaches it gets the same `422`. A
+  real 5 MB email prints 5 to 7 MB; the cap is reached by emails full of
+  control characters, which JSON prints as six bytes each, or with more than
+  about 35,000 MIME parts.
 - Rate limit: 10 requests per 60-second sliding window per client key, in
   memory, for at most 10 000 keys (least recently used evicted first). The
   client key is the first `X-Forwarded-For` value, or the peer address without

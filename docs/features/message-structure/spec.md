@@ -98,9 +98,9 @@ attachments, because entries are removed from none of them.
    text chosen by the sender. This service passes it on as JSON and does
    not interpret it. It never reaches a log line.
 1. The tree grows with the number of MIME parts, which the sender
-   chooses. The child's limits bound what it can print (see
-   [Measurements](#measurements-2026-11-27)); the cut below bounds the
-   response.
+   chooses, and `message` grows with what the sender writes. The output cap
+   below bounds what the child can print, both documents together; the cut
+   below bounds the tree in the response.
 1. Errors are read from stderr. The detail of a `422` is the text after
    `An error occurred:` on stderr, `TOO_COMPLEX_ERROR` when that text is
    empty (a `MemoryError` has none), the generic error otherwise. stdout
@@ -134,7 +134,29 @@ that the live parser page and MailXRay read one shape:
 
 Decided on 2026-11-27: `message` is not cut. MailXRay also keeps only the
 first 100 `received_header_defects`; this service does not, because
-`message` stays what mail-parser prints.
+`message` stays what mail-parser prints. It is bounded as a whole instead,
+by the output cap.
+
+## Output cap
+
+Decided with the owner on 2026-11-27, after the security review: the CLI
+may print at most 16 MiB (`CHILD_OUTPUT_BYTES`), the mail and the tree
+together. An email that reaches it fails with `422` and
+`TOO_COMPLEX_ERROR`; `message` is whole or absent, never cut.
+
+- Why: a control character prints as six bytes (`\u0001`), and a value can
+  appear more than once in `message` (`to`, then `raw` and `candidates` of
+  its address defect). 5 MB of control characters in the body or in the
+  `Received` headers made a 30 MB response and held about 114 MiB in
+  uvicorn per parse; 3 MB in one `Content-Type` parameter made 18 MB.
+- How: stdout goes to an anonymous temporary file in `/tmp` (a tmpfs in
+  the container), and on Linux `prlimit --fsize` makes the kernel refuse
+  writes past the cap, so the child stops there. Its size is checked after
+  the child exits on every platform.
+- Cost: a real 5 MB email prints 5 to 7 MB, payloads of attachments
+  included, which the service removes afterwards. The tree is the other
+  cost: about 420 bytes per part, so the largest tree that passes drops
+  from about 70,000 parts to about 35,000 (see the measurements).
 
 MailXRay also refuses to build the tree of a message with more than 50,000
 parts, by counting them first. This service cannot: the CLI builds the whole
@@ -158,34 +180,38 @@ alive; under that load the kernel kills children, which answer `422`.
 Docker on Apple silicon, `python:3.13-slim` (3.13.18, aarch64),
 `mail-parser[outlook]==4.12.0`, a 512 MiB container, the child run as the
 service runs it: `choom -n 1000 -- prlimit --as=201326592 --`,
-`--json --mime-tree`, 10-second timeout.
+`--json --mime-tree`, 10-second timeout. The rows of parts are those of the
+16 MiB output cap (`prlimit --fsize`); without it the address-space cap
+alone passed 88,000 empty and 68,000 tiny parts.
 
 | Email                                     | Result                                    |
 | ----------------------------------------- | ----------------------------------------- |
-| N empty parts (5 bytes each)              | passes up to 88,000; 91,000 and more fail |
-| N tiny `text/plain` parts (32 bytes each) | passes up to 68,000; 70,000 and more fail |
+| N empty parts (5 bytes each)              | passes up to 40,000; 50,000 and more fail |
+| N tiny `text/plain` parts (32 bytes each) | passes up to 34,000; 36,000 and more fail |
 | 5 MiB, one base64 attachment              | passes, 60.5 MiB child peak, as `--json`  |
 | 5 MiB, twenty base64 attachments          | passes, 52.4 MiB child peak, as `--json`  |
 | multipart nested N levels                 | passes up to 970; 980 and more fail       |
 
-- Above the limit the child fails with `MemoryError` while printing the
-  tree: exit code 1, the first document complete on stdout, nothing of the
-  tree. That is unparsable output, a `422` with `TOO_COMPLEX_ERROR`. No run
-  was killed and none came closer than 6.5 seconds to the timeout.
+- Above the limit the child reaches the output cap and answers `422` with
+  `TOO_COMPLEX_ERROR` in under 1.5 seconds. Without the output cap it
+  failed with `MemoryError` while printing the tree, the first document
+  complete on stdout. No run was killed and none came closer than 6.5
+  seconds to the timeout.
+- With the output cap, uvicorn held at most 42 MiB per parse in every run,
+  the 5 MB emails of control characters included.
 - Without `--mime-tree` the same cap passes about 250,000 empty parts: the
   tree lowers the limit to about 90,000.
-- The largest tree that passes is 29 to 37 MB of JSON, about 420 bytes per
-  entry. Holding it and decoding all of it at once, ASCII only, peaked at
-  125 MiB in the parent; two such parses at once peaked at 411 MiB in the
-  container, without uvicorn. The service no longer decodes it at once (see
-  above).
+- Without the output cap the largest tree that passed was 29 to 37 MB of
+  JSON, about 420 bytes per entry. Holding it and decoding all of it at
+  once, ASCII only, peaked at 125 MiB in the parent; two such parses at
+  once peaked at 411 MiB in the container, without uvicorn.
 - Nesting fails with `MailParserRecursionError` with or without
   `--mime-tree`; it is a limit of the parse, not of the tree.
 - No lone surrogate reached stdout: the CLI writes UTF-8 with
   `ensure_ascii=False`, and undecodable bytes in tree values arrive as
   U+FFFD.
 
-Decision (owner, 2026-11-27): failing above about 70,000 parts is
+Decision (owner, 2026-11-27): failing above about 35,000 parts is
 acceptable for the page; no count of our own before the parse.
 
 ## Acceptance
@@ -200,6 +226,8 @@ acceptable for the page; no count of our own before the parse.
    a file name of 5,000 characters returns 1024 of them and
    `cut == ["filename"]`; entries past 262,144 characters of text are left
    out and counted.
+1. Output that reaches 16 MiB yields `422` with `TOO_COMPLEX_ERROR`, and
+   the Linux child limits include `--fsize`.
 1. A failing CLI whose stderr has `An error occurred: <text>` yields `422`
    with `<text>`, and with `TOO_COMPLEX_ERROR` when the text is empty.
 1. README endpoint contract updated with the new keys and the table above.
