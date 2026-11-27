@@ -25,11 +25,10 @@ MIME tree.
 
 ## Blocked by
 
-A mail-parser release that has the `--mime-tree` flag. It was implemented
-on mail-parser's `feature/message-structure` branch after 4.11.0 and is not
-released yet. `pyproject.toml` must then require that version
-(`mail-parser[outlook]>=<that version>`), because an older CLI rejects the
-flag and every parse would fail.
+Nothing any more. mail-parser 4.12.0, released, has the `--mime-tree` flag
+and the security fixes made since 4.11.0. `pyproject.toml` must require it
+(`mail-parser[outlook]>=4.12.0`), because an older CLI rejects the flag and
+every parse would fail.
 
 ## What mail-parser provides
 
@@ -77,9 +76,10 @@ attachments, because entries are removed from none of them.
   "mail_parser_version": "<version>",
   "message": {"...": "unchanged"},
   "mime_tree": [
-    {"index": 0, "parent": null, "depth": 0, "content_type": "multipart/mixed", "...": "..."},
-    {"index": 1, "parent": 0, "depth": 1, "content_type": "text/plain", "...": "..."}
-  ]
+    {"index": 0, "parent": null, "depth": 0, "content_type": "multipart/mixed", "...": "...", "cut": []},
+    {"index": 1, "parent": 0, "depth": 1, "content_type": "text/plain", "...": "...", "cut": []}
+  ],
+  "mime_tree_parts_left_out": 0
 }
 ```
 
@@ -104,10 +104,31 @@ attachments, because entries are removed from none of them.
    alone. Under the 192 MiB cap such a message fails as too complex; the
    open point is the largest tree that still passes.
 
+## How a cut tree is reported
+
+Decided with the owner on 2026-11-26, together with the same feature in
+MailXRay (`docs/features/message-structure/spec.md` in mailxray-backend), so
+that the live parser page and MailXRay read one shape:
+
+- The response keeps the first 500 entries of the tree. Parents come before
+  children, so what is kept is a valid tree.
+- A new key beside `mime_tree`, `mime_tree_parts_left_out`, is the number of
+  entries not kept, `0` when the tree is whole. It is always present.
+- Every string value of an entry, the three values of `embedded_headers`
+  included, is cut to 1024 characters. Every entry gains a key `cut`: the
+  names of the keys that were cut (`embedded_headers.subject` for a nested
+  one), an empty list otherwise.
+
+MailXRay also refuses to build the tree of a message with more than 50,000
+parts, by counting them first. This service cannot: the CLI builds the whole
+tree in the child before anything is printed. The child's limits stay the
+guard here, and such a message fails as too complex.
+
 ## Open questions for the implementation
 
-- Does the number above call for a cap on the number of entries, and if
-  so how is a cut tree reported to the page?
+- The cut above bounds the response, not the child. What is the largest tree
+  the child still produces under the 192 MiB cap, and is failing above it
+  acceptable for the page?
 - Reading the tree makes mail-parser decode each base64 attachment once to
   measure it. Does a 5 MB email stay inside the 192 MiB address-space cap?
 
