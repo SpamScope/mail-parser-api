@@ -4,7 +4,10 @@ import json
 import signal
 import subprocess
 import sys
+from dataclasses import dataclass
 from typing import Any
+
+from mail_parser_api.mime_tree import read_mime_tree
 
 PARSE_TIMEOUT_SECONDS = 10
 
@@ -13,13 +16,15 @@ PARSE_TIMEOUT_SECONDS = 10
 CHILD_ADDRESS_SPACE_BYTES = 192 * 1024 * 1024
 
 # The installed mail-parser CLI, run with the same interpreter as the service.
-# ``-l ERROR`` keeps warnings off stdout; error lines may still precede the JSON.
+# It prints the mail, then the MIME tree, as two JSON documents on stdout; its
+# log lines go to stderr, and ``--log-level ERROR`` keeps only the errors.
 MAIL_PARSER_COMMAND = (
     sys.executable,
     "-m",
     "mailparser",
     "--stdin",
     "--json",
+    "--mime-tree",
     "--log-level",
     "ERROR",
 )
@@ -38,11 +43,27 @@ LINUX_CHILD_LIMITS = (
     "--",
 )
 
-# Prefix of the line the CLI logs on stdout when parsing fails.
+# Prefix of the line the CLI logs on stderr when parsing fails.
 ERROR_MARKER = "An error occurred: "
 GENERIC_ERROR = "mail-parser could not parse the email"
 # The child was killed by the kernel or logged a MemoryError, which has no text.
 TOO_COMPLEX_ERROR = "email too complex to parse within the service limits"
+
+
+@dataclass(frozen=True)
+class ParsedEmail:
+    """The two documents the CLI prints for one email, shaped for the response.
+
+    Attributes:
+        message: The mail-parser JSON of the email without attachment payloads.
+        mime_tree: The kept entries of the MIME tree, each with ``cut``.
+        mime_tree_parts_left_out: The entries of the MIME tree not kept.
+
+    """
+
+    message: dict[str, Any]
+    mime_tree: list[dict[str, Any]]
+    mime_tree_parts_left_out: int
 
 
 class ParseError(Exception):
@@ -53,20 +74,22 @@ class ParseTimeoutError(Exception):
     """mail-parser did not finish within the timeout."""
 
 
-def parse_email(raw_email: bytes) -> dict[str, Any]:
+def parse_email(raw_email: bytes) -> ParsedEmail:
     """Parse a raw email with the mail-parser CLI.
 
     The email is passed on stdin, never through a shell. Attachment payloads are
-    removed from the result; their metadata is kept.
+    removed from the message; their metadata is kept. The MIME tree is bounded
+    as :func:`mail_parser_api.mime_tree.read_mime_tree` describes.
 
     Args:
         raw_email: The raw email bytes.
 
     Returns:
-        The mail-parser JSON of the email without attachment payloads.
+        The message and the MIME tree of the email.
 
     Raises:
-        ParseError: mail-parser exited with an error or printed no JSON.
+        ParseError: mail-parser exited with an error or did not print both
+            JSON documents.
         ParseTimeoutError: mail-parser ran longer than the timeout and was killed.
 
     """
@@ -83,14 +106,18 @@ def parse_email(raw_email: bytes) -> dict[str, Any]:
 
     if completed.returncode == -signal.SIGKILL:
         raise ParseError(TOO_COMPLEX_ERROR)
-    stdout = completed.stdout.decode("utf-8", errors="replace")
     if completed.returncode != 0:
-        raise ParseError(_error_message(stdout))
+        raise ParseError(_error_message(completed.stderr))
 
-    message = _extract_json(stdout)
+    stdout = completed.stdout.decode("utf-8", errors="replace")
+    try:
+        message, end = _decode_message(stdout)
+        mime_tree, parts_left_out = read_mime_tree(stdout, end)
+    except ValueError as error:
+        raise ParseError(GENERIC_ERROR) from error
     for attachment in message.get("attachments", []):
         attachment.pop("payload", None)
-    return message
+    return ParsedEmail(message, mime_tree, parts_left_out)
 
 
 def _command() -> tuple[str, ...]:
@@ -100,29 +127,25 @@ def _command() -> tuple[str, ...]:
     return MAIL_PARSER_COMMAND
 
 
-def _extract_json(stdout: str) -> dict[str, Any]:
-    """Return the JSON object printed by the CLI.
+def _decode_message(stdout: str) -> tuple[dict[str, Any], int]:
+    """Return the mail JSON object that starts stdout and where it ends.
 
-    Log lines start with a timestamp; the JSON object is printed with indent=2,
-    so it is the first line made of a lone ``{``. It is decoded in place, without
-    copying the output, to keep the memory of large results low.
+    It is decoded in place, without copying the output, to keep the memory of
+    large results low.
+
+    Raises:
+        ValueError: stdout does not start with a JSON object.
+
     """
-    if stdout.startswith("{\n"):
-        start = 0
-    else:
-        start = stdout.find("\n{\n") + 1
-        if start == 0:
-            raise ParseError(GENERIC_ERROR)
-    try:
-        message, _ = json.JSONDecoder().raw_decode(stdout, start)
-    except ValueError as error:
-        raise ParseError(GENERIC_ERROR) from error
-    return message
+    if not stdout.startswith("{"):
+        message = "the output does not start with a JSON object"
+        raise ValueError(message)
+    return json.JSONDecoder().raw_decode(stdout)
 
 
-def _error_message(stdout: str) -> str:
-    """Return the error message logged by the CLI, or a generic one."""
-    for line in stdout.splitlines():
+def _error_message(stderr: bytes) -> str:
+    """Return the error message the CLI logged on stderr, or a generic one."""
+    for line in stderr.decode("utf-8", errors="replace").splitlines():
         _, marker, message = line.partition(ERROR_MARKER)
         if marker:
             return message.strip() or TOO_COMPLEX_ERROR

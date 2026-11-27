@@ -95,14 +95,19 @@ def create_app() -> FastAPI:
 
         try:
             async with parse_slots:
-                message = await asyncio.to_thread(parse_email, raw_email)
+                parsed = await asyncio.to_thread(parse_email, raw_email)
         except ParseTimeoutError as error:
             raise HTTPException(status_code=504, detail="Parsing timed out") from error
         except ParseError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
         return JSONResponse(
-            {"mail_parser_version": MAIL_PARSER_VERSION, "message": message}
+            {
+                "mail_parser_version": MAIL_PARSER_VERSION,
+                "message": parsed.message,
+                "mime_tree": parsed.mime_tree,
+                "mime_tree_parts_left_out": parsed.mime_tree_parts_left_out,
+            }
         )
 
     return app
